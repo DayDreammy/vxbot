@@ -16,7 +16,6 @@ lib64/
 parts/
 sdist/
 var/
-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -40,8 +39,5 @@ logs/
 *.sqlite3
 
 # Application specific
-data/
-qr_code.png
-
-# Playwright
-.playwright/
+data/articles/images/
+data/articles/pdfs/

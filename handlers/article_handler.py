@@ -81,7 +81,10 @@ class WeChatArticleHandler(MessageHandler):
 
             async with async_playwright() as p:
                 browser = await p.chromium.launch()
-                page = await browser.new_page()
+                context = await browser.new_context(
+                    viewport={'width': 1280, 'height': 1024}
+                )
+                page = await context.new_page()
                 
                 # 访问文章页面
                 self.logger.info(f"正在获取文章内容: {article.title}")
@@ -95,34 +98,86 @@ class WeChatArticleHandler(MessageHandler):
                 }''')
                 article.content = content
 
-                # 获取文章中的图片
-                images = await page.evaluate('''() => {
+                # 处理延迟加载的图片
+                await page.evaluate('''() => {
                     const images = Array.from(document.querySelectorAll('#js_content img'));
-                    return images.map(img => ({
-                        src: img.src,
-                        data_src: img.getAttribute('data-src')
-                    }));
+                    images.forEach(img => {
+                        if (img.dataset.src) {
+                            img.src = img.dataset.src;
+                            img.style.visibility = 'visible';
+                            img.style.opacity = '1';
+                            img.removeAttribute('data-src');
+                        }
+                    });
+                }''')
+
+                # 等待所有图片加载完成
+                await page.evaluate('''() => {
+                    return Promise.all(
+                        Array.from(document.querySelectorAll('#js_content img'))
+                            .filter(img => !img.complete)
+                            .map(img => new Promise(resolve => {
+                                img.onload = img.onerror = resolve;
+                            }))
+                    );
+                }''')
+
+                # 获取图片URL列表
+                images = await page.evaluate('''() => {
+                    return Array.from(document.querySelectorAll('#js_content img'))
+                        .map(img => img.src);
                 }''')
 
                 # 下载图片
                 image_paths = []
-                for i, img in enumerate(images):
-                    img_url = img['data_src'] or img['src']
+                for i, img_url in enumerate(images):
                     if img_url:
                         img_filename = f"{url_hash}_{i}.jpg"
                         img_path = self.storage_path / 'images' / img_filename
                         try:
-                            await page.goto(img_url)
-                            await page.screenshot(path=str(img_path))
-                            image_paths.append(str(img_path))
+                            # 直接下载图片
+                            response = await context.request.get(img_url)
+                            if response.ok:
+                                content = await response.body()
+                                img_path.write_bytes(content)
+                                image_paths.append(str(img_path))
+                            else:
+                                self.logger.error(f"下载图片失败: {img_url}, 状态码: {response.status}")
                         except Exception as e:
                             self.logger.error(f"下载图片失败: {img_url}, 错误: {e}")
 
                 article.images = image_paths
 
-                # 返回文章页面并保存为PDF
-                await page.goto(article.url, wait_until='networkidle')
-                await page.pdf(path=str(pdf_path))
+                # 注入CSS以优化PDF布局
+                await page.add_style_tag(content='''
+                    #js_content {
+                        padding: 20px !important;
+                    }
+                    #js_content img {
+                        max-width: 100% !important;
+                        height: auto !important;
+                        margin: 10px 0 !important;
+                        page-break-inside: avoid !important;
+                        display: block !important;
+                    }
+                    #js_content * {
+                        max-width: 100% !important;
+                        word-break: break-word !important;
+                    }
+                ''')
+
+                # 设置PDF选项并生成PDF
+                await page.pdf(**{
+                    'path': str(pdf_path),
+                    'format': 'A4',
+                    'print_background': True,
+                    'margin': {
+                        'top': '20px',
+                        'right': '20px',
+                        'bottom': '20px',
+                        'left': '20px'
+                    }
+                })
                 article.pdf_path = str(pdf_path)
 
                 await browser.close()
