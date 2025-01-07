@@ -1,0 +1,15 @@
+[Unit]
+Description=WeChat Login Service
+After=network.target
+
+[Service]
+Type=simple
+User=yy
+WorkingDirectory=/home/yy/project/Gewechat/vxbot
+Environment="PATH=/home/yy/anaconda3/envs/vxbot/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/home/yy/anaconda3/envs/vxbot/bin/python /home/yy/project/Gewechat/vxbot/login.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target 

@@ -10,6 +10,7 @@ import concurrent.futures
 from handlers.handlers import MessageProcessor, TextMessageHandler, ImageMessageHandler, FileMessageHandler, MessageHandler
 from login import WeChatLogin
 
+from config import Config
 
 class HandlerRegistry:
     """处理器注册表，用于管理处理器的层级关系"""
@@ -175,15 +176,21 @@ class AsyncWeChatBotRequestHandler(BaseHTTPRequestHandler):
 
 def setup_logger():
     """设置日志配置"""
+    import os
+    
     if not os.path.exists('logs'):
         os.makedirs('logs')
 
     today = datetime.now().strftime('%Y-%m-%d')
-    log_file = f'logs/bot_{today}.log'
+    log_file = f'logs/wechat_{today}.log'
+
+    # 从环境变量获取日志级别，默认为INFO
+    log_level = os.environ.get('LOG_LEVEL', 'INFO').upper()
+    level = getattr(logging, log_level, logging.INFO)
 
     # 创建格式化器
     formatter = logging.Formatter(
-        '%(asctime)s [%(levelname)s] %(message)s',
+        '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
@@ -194,30 +201,51 @@ def setup_logger():
     if logger.handlers:
         return logger
 
-    logger.setLevel(logging.INFO)
+    logger.setLevel(level)
 
     # 文件处理器
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
-    # 控制台处理器
+    # 控制台处理器 - 总是使用INFO级别，避免控制台输出过多信息
     console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
+
+    # systemd journal处理器 - 使用与主日志相同的级别
+    try:
+        from systemd import journal
+        journal_handler = journal.JournalHandler(
+            SYSLOG_IDENTIFIER='wechat-bot'
+        )
+        journal_handler.setLevel(level)
+        journal_handler.setFormatter(formatter)
+        logger.addHandler(journal_handler)
+    except ImportError:
+        logger.debug("systemd journal模块未安装，跳过journal日志配置")
 
     # 阻止日志向上传播到根记录器
     logger.propagate = False
 
+    logger.debug(f"日志系统初始化完成，级别: {log_level}")
     return logger
 
 
 class AsyncWeChatBotServer:
     def __init__(self, port=8069):
+        from handlers.group_monitor_handler import GroupMonitorHandler
+        self.GroupMonitorHandler = GroupMonitorHandler
         self.port = port
         self.httpd = None
         self.logger = setup_logger()
         self.loop = None
+        
+        # 加载配置
+        self.config = Config().config
+        
         # 使用新的MessageProcessor替代AsyncMessageProcessor
         self.message_processor = MessageProcessor()
         # 从 login 获取 token
@@ -230,7 +258,10 @@ class AsyncWeChatBotServer:
                          parent_handler: Optional[Type[MessageHandler]] = None):
         """注册处理器"""
         # 创建处理器实例
-        handler = handler_class()
+        if handler_class == self.GroupMonitorHandler:
+            handler = handler_class(self.config)
+        else:
+            handler = handler_class()
 
         if parent_handler is None:
             # 如果没有父处理器，直接添加到根处理器列表
@@ -315,22 +346,21 @@ def run_server(port=8069):
     server.register_handler(ImageMessageHandler)
     server.register_handler(FileMessageHandler)
 
+    # 注册文章处理器
+    from handlers.article_handler import WeChatArticleHandler
+    server.register_handler(WeChatArticleHandler)
+
     # 注册单次提交处理器
     from handlers.singleSubmitHandler.single_submit_handler import SingleSubmitHandler
     server.register_handler(SingleSubmitHandler,TextMessageHandler)
 
-    # 注册AI对话处理器
-    from handlers.singleSubmitHandler.aiChatHandler.ai_chat_handler import AIChatHandler
-    server.register_handler(AIChatHandler, SingleSubmitHandler)
+    # 注册群组监控处理器
+    from handlers.group_monitor_handler import GroupMonitorHandler
+    server.register_handler(GroupMonitorHandler, TextMessageHandler)
 
-    # # 注册Echo处理器作为SingleSubmitHandler的子处理器
-    # from handlers.singleSubmitHandler.echoHandler.echo_handler import EchoHandler
-    # server.register_handler(EchoHandler, SingleSubmitHandler)
-
-    # # 注册文件处理器的子处理器
-    # server.register_handler(ExcelHandler, FileMessageHandler)
-    # # 注册Excel处理器的子处理器
-    # server.register_handler(SalesExcelHandler, ExcelHandler)
+    # 注释掉这两行来禁用 AI 聊天功能
+    # from handlers.singleSubmitHandler.aiChatHandler.ai_chat_handler import AIChatHandler
+    # server.register_handler(AIChatHandler, SingleSubmitHandler)
 
     try:
         server.start()

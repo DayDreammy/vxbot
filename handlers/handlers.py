@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Any
 import logging
+import json
 
 
 class MessageContext:
@@ -29,7 +30,11 @@ class MessageContext:
         self.xml_content = None
         if self.content and (self.msg_type in [3, 49]):
             try:
-                self.xml_content = ET.fromstring(self.content)
+                # 处理群消息内容
+                xml_text = self.content
+                if ':\n' in xml_text:  # 群消息格式
+                    xml_text = xml_text.split(':\n', 1)[1]  # 获取实际的XML内容
+                self.xml_content = ET.fromstring(xml_text)
             except ET.ParseError:
                 self.xml_content = None
 
@@ -136,12 +141,25 @@ class FileMessageHandler(MessageHandler):
         return context.msg_type == 49
 
     async def handle(self, context: MessageContext) -> bool:
+        # 添加原始消息内容的日志
+        self.logger.info(f"原始消息数据: {json.dumps(context.data, ensure_ascii=False, indent=2)}")
+        self.logger.info(f"消息内容: {context.content}")
+        
         if context.xml_content is None:
             self.logger.error("文件消息XML解析失败")
             return False
 
+        # 添加XML内容的日志
+        self.logger.info(f"XML内容: {ET.tostring(context.xml_content, encoding='unicode')}")
+
         appmsg = context.xml_content.find('.//appmsg')
         if appmsg is not None:
+            # 添加appmsg内容的日志
+            self.logger.info(f"appmsg内容: {ET.tostring(appmsg, encoding='unicode')}")
+            
+            msg_type = appmsg.find('type').text if appmsg.find('type') is not None else 'unknown'
+            self.logger.info(f"消息类型: {msg_type}")
+            
             title = appmsg.find('title').text if appmsg.find('title') is not None else ''
             file_ext = appmsg.find('.//fileext').text if appmsg.find('.//fileext') is not None else ''
 
@@ -153,15 +171,16 @@ class FileMessageHandler(MessageHandler):
 
                 self.logger.info(f"收到文件消息 - 来自: {context.from_user}")
                 self.logger.info(f"文件名: {title}, 类型: {file_ext}, 大小: {file_size}字节")
-                self.logger.debug(f"文件CDN URL: {cdn_url}")
-                self.logger.debug(f"文件AES Key: {aes_key}")
+                self.logger.info(f"文件CDN URL: {cdn_url}")
+                self.logger.info(f"文件AES Key: {aes_key}")
 
                 context.processed_data.update({
                     'file_name': title,
                     'file_ext': file_ext,
                     'file_size': int(file_size),
                     'cdn_url': cdn_url,
-                    'aes_key': aes_key
+                    'aes_key': aes_key,
+                    'msg_type': msg_type
                 })
                 return True
 

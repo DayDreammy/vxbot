@@ -1,0 +1,18 @@
+[Unit]
+Description=WeChat Bot Service
+After=network.target wechat-login.service
+Requires=wechat-login.service
+
+[Service]
+Type=simple
+User=yy
+WorkingDirectory=/home/yy/project/Gewechat/vxbot
+Environment="PATH=/home/yy/anaconda3/envs/vxbot/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+Environment="LOG_LEVEL=DEBUG"
+ExecStart=/home/yy/anaconda3/envs/vxbot/bin/python /home/yy/project/Gewechat/vxbot/bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target 

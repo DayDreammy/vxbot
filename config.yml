@@ -1,19 +1,36 @@
 alerts:
   email:
     enabled: true
-    recipient_email: xxx@qq.com
-    sender_email: xxx@qq.com
-    sender_password: xxx
+    recipient_email: 1781051483@qq.com
+    sender_email: daydreammy@163.com
+    sender_password: NUYQEBJEHZRHGLSI
     smtp_port: 465
-    smtp_server: smtp.qq.com
+    smtp_server: smtp.163.com
   telegram:
     bot_token: xxx
     chat_id: xxx
-    enabled: true
+    enabled: false
 monitoring:
   check_interval: 30
 wechat:
-  app_id:
+  app_id: wx_gkx30OydSDfH_QfzWXlU5
   base_url: http://localhost:2531/v2/api
-  callback_url: http://192.168.1.2:8069/callback
-  token:
+  callback_url: http://192.168.123.249:8069/callback
+  token: 7c26f9afbab04fa681d0de588ec0279e
+
+message_monitor:
+  # 需要监控的群组ID列表
+  target_groups:
+    - "48922992214@chatroom"
+    - "43500136128@chatroom"
+  
+  # 数据库配置
+  database:
+    type: "sqlite"  # 先用sqlite简单实现
+    path: "data/message_monitor.db"
+    
+  # 存储配置
+  storage:
+    # 是否存储图片/文件的本地副本
+    save_media: true
+    media_path: "data/media" 

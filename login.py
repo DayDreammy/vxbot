@@ -181,12 +181,33 @@ class WeChatLogin:
 
                     qr_base64 = qr_base64.strip()
 
+                    # 保存二维码图片
                     img_data = base64.b64decode(qr_base64)
-                    with open("qr_code.png", "wb") as f:
+                    qr_path = "qr_code.png"
+                    with open(qr_path, "wb") as f:
                         f.write(img_data)
 
-                    img = Image.open("qr_code.png")
-                    img.show()
+                    self.logger.info(f"二维码已保存到: {os.path.abspath(qr_path)}")
+                    
+                    # 尝试使用不同的方法显示二维码
+                    try:
+                        # 1. 尝试使用终端QR码显示（如果安装了qrcode库）
+                        try:
+                            import qrcode
+                            qr = qrcode.QRCode()
+                            qr.add_data(data["data"]["url"])  # 假设API返回了url字段
+                            qr.print_ascii()
+                            self.logger.info("二维码已在终端显示")
+                        except (ImportError, KeyError):
+                            pass
+
+                        # 2. 提供在线查看链接（如果API返回了url）
+                        if "url" in data["data"]:
+                            self.logger.info(f"二维码链接: {data['data']['url']}")
+                        
+                    except Exception as e:
+                        self.logger.warning(f"显示二维码时出现问题: {e}")
+                    
                     return True
                 except Exception as e:
                     self.logger.error(f"处理二维码图片失败: {e}")
