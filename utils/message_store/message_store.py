@@ -75,6 +75,47 @@ class MessageStore:
             self.logger.error(f"存储消息时发生错误: {str(e)}")
             raise
 
+    async def store_message_to_unified_db(self, message_data: dict):
+        """存储消息到统一数据库"""
+        # 存储到统一数据库
+        try:
+            # 准备统一数据库的数据
+            content = message_data['content']
+            title = content[:100] + '...' if len(content) > 100 else content
+            url = f"wechat://message/{message_data['message_id']}"
+            
+            # 假设群名映射到行业的逻辑
+            industry = '电子'  # 需要根据实际情况设置行业
+            
+            unified_data = (
+                title,                          # title
+                message_data.get('processed_data') or content,  # content
+                None,                           # summary
+                url,                            # url
+                None,                           # company_name
+                None,                           # stock_code
+                industry,                       # industry
+                '微信群',                        # info_type
+                message_data['group_id'],       # source_detail
+                message_data.get('media_path'), # local_file_path
+                message_data.get('created_at', datetime.now()),  # publish_time
+                json.dumps(message_data.get('raw_data', {}))    # raw_data
+            )
+            
+            async with aiosqlite.connect(str(self.unified_db_path)) as db:
+                await db.execute("""
+                    INSERT INTO unified_information (
+                        title, content, summary, url, company_name, 
+                        stock_code, industry, info_type, source_detail,
+                        local_file_path, publish_time, raw_data
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, unified_data)
+                await db.commit()
+                    
+            self.logger.info(f"消息已同时存储到统一数据库")
+        except Exception as e:
+            self.logger.error(f"存储到统一数据库时发生错误: {e}")
+
     async def get_messages(self, group_id: str):
         """获取指定群组的消息"""
         db = await self.connect()

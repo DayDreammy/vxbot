@@ -7,6 +7,9 @@ import uuid
 import asyncio
 import json
 import base64
+import aiosqlite
+import sqlite3
+from datetime import datetime
 
 class GroupMonitorHandler(MessageHandler):
     def __init__(self, config: dict):
@@ -17,6 +20,9 @@ class GroupMonitorHandler(MessageHandler):
         self.store = MessageStore(monitor_config.get('database', {}).get('path', 'data/message_monitor.db'))
         self.save_media = monitor_config.get('storage', {}).get('save_media', False)
         self.media_path = Path(monitor_config.get('storage', {}).get('media_path', 'data/media'))
+        
+        # 添加统一数据库路径
+        self.unified_db_path = Path('/home/yy/project/liujing-project-zhengquan/data/unified_information.db')
         
         # 获取API配置
         wechat_config = config.get('wechat', {})
@@ -57,10 +63,17 @@ class GroupMonitorHandler(MessageHandler):
     async def handle(self, context: MessageContext) -> bool:
         """处理消息"""
         try:
+            # 原有的消息存储
             message_data = await self._extract_message_data(context)
             await self.store.store_message(message_data)
             self.logger.info(f"已存储来自群 {message_data['group_id']} 的消息")
+            
+            # 统一数据库存储
+            await self.store.store_message_to_unified_db(message_data)
+            self.logger.info(f"已同时存储到统一数据库")
+            
             return True
+            
         except Exception as e:
             self.logger.error(f"存储消息时发生错误: {e}")
             return False

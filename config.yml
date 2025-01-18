@@ -13,10 +13,10 @@ alerts:
 monitoring:
   check_interval: 30
 wechat:
-  app_id: wx_gkx30OydSDfH_QfzWXlU5
+  app_id: 
   base_url: http://localhost:2531/v2/api
   callback_url: http://192.168.123.249:8069/callback
-  token: 7c26f9afbab04fa681d0de588ec0279e
+  token: 
 
 message_monitor:
   # 需要监控的群组ID列表
