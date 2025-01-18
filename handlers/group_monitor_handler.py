@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from utils.message_store import MessageStore
 from utils.media_downloader import MediaDownloader
+from utils.bot import ChatBot  # Local import
 import uuid
 import asyncio
 import json
@@ -10,6 +11,10 @@ import base64
 import aiosqlite
 import sqlite3
 from datetime import datetime
+import sys
+sys.path.append('/home/yy/project/liujing-project-zhengquan')
+from src.celery_task.tasks import llm_summary_task
+
 
 class GroupMonitorHandler(MessageHandler):
     def __init__(self, config: dict):
@@ -68,15 +73,66 @@ class GroupMonitorHandler(MessageHandler):
             await self.store.store_message(message_data)
             self.logger.info(f"已存储来自群 {message_data['group_id']} 的消息")
             
-            # 统一数据库存储
-            await self.store.store_message_to_unified_db(message_data)
-            self.logger.info(f"已同时存储到统一数据库")
+            # 存储到统一数据库并获取记录ID
+            unified_id = await self.store.store_message_to_unified_db(message_data, str(self.unified_db_path))
+            if unified_id:
+                # 触发LLM摘要任务
+                llm_summary_task.delay([unified_id])
+                self.logger.info(f"已触发LLM摘要任务，记录ID: {unified_id}")
             
             return True
             
         except Exception as e:
             self.logger.error(f"存储消息时发生错误: {e}")
             return False
+
+    async def store_to_unified_db(self, message_data: dict) -> int:
+        """存储消息到统一数据库并返回记录ID"""
+        try:
+            content = message_data['content']
+            title = content[:100] + '...' if len(content) > 100 else content
+            url = f"wechat://message/{message_data['message_id']}"
+            
+            # 假设群名映射到行业的逻辑
+            industry = '电子'  # 需要根据实际情况设置行业
+            
+            unified_data = (
+                title,                          # title
+                message_data.get('processed_data') or content,  # content
+                None,                           # summary
+                url,                            # url
+                None,                           # company_name
+                None,                           # stock_code
+                industry,                       # industry
+                '微信群',                        # info_type
+                message_data['group_id'],       # source_detail
+                message_data.get('media_path'), # local_file_path
+                message_data.get('created_at', datetime.now()),  # publish_time
+                json.dumps(message_data.get('raw_data', {}))    # raw_data
+            )
+            
+            async with aiosqlite.connect(str(self.unified_db_path)) as db:
+                cursor = await db.execute("""
+                    INSERT INTO unified_information (
+                        title, content, summary, url, company_name, 
+                        stock_code, industry, info_type, source_detail,
+                        local_file_path, publish_time, raw_data
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    RETURNING id
+                """, unified_data)
+                await db.commit()
+                
+                # 获取插入记录的ID
+                row = await cursor.fetchone()
+                if row:
+                    return row[0]
+                    
+        except sqlite3.IntegrityError:
+            self.logger.debug(f"消息已存在于统一数据库中，跳过")
+        except Exception as e:
+            self.logger.error(f"存储到统一数据库时发生错误: {e}")
+        
+        return None
 
     async def _save_media_info(self, context: MessageContext, message_id: str) -> str:
         """保存媒体信息"""

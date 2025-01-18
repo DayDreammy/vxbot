@@ -10,27 +10,20 @@ alerts:
     bot_token: xxx
     chat_id: xxx
     enabled: false
+message_monitor:
+  database:
+    path: data/message_monitor.db
+    type: sqlite
+  storage:
+    media_path: data/media
+    save_media: true
+  target_groups:
+  - 48922992214@chatroom
+  - 43500136128@chatroom
 monitoring:
   check_interval: 30
 wechat:
-  app_id: 
+  app_id: wx_AS5eTRwpCC2spVAt9ovsV
   base_url: http://localhost:2531/v2/api
   callback_url: http://192.168.123.249:8069/callback
-  token: 
-
-message_monitor:
-  # 需要监控的群组ID列表
-  target_groups:
-    - "48922992214@chatroom"
-    - "43500136128@chatroom"
-  
-  # 数据库配置
-  database:
-    type: "sqlite"  # 先用sqlite简单实现
-    path: "data/message_monitor.db"
-    
-  # 存储配置
-  storage:
-    # 是否存储图片/文件的本地副本
-    save_media: true
-    media_path: "data/media" 
+  token: 7c26f9afbab04fa681d0de588ec0279e
