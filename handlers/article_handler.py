@@ -10,6 +10,52 @@ from pathlib import Path
 import os
 from playwright.async_api import async_playwright
 import hashlib
+import sys
+import sqlite3
+
+sys.path.append('/home/yy/project/liujing-project-zhengquan')
+from src.celery_task.tasks import llm_summary_task
+
+IF_ACCOUNT_WHITELIST = False
+
+# 微信相关配置
+WECHAT_FILTERS = {
+    # 公众号白名单
+    'account_whitelist': {
+        '信息平权',
+        '计墨社',
+        '刘翔科技研究',
+        '集微网',
+        '未来半导体',
+        '半导体行业联盟',
+        'AR圈',
+        '蓝猫研究所',
+        'gh_7d107b7b55f4'  # 摩尔芯闻
+    },
+    
+    # 群聊白名单
+    'group_whitelist': {
+        '48922992214@chatroom',
+        '43500136128@chatroom'
+    }
+}
+
+# 行业映射配置
+INDUSTRY_MAPPING = {
+    # 公众号到行业的映射
+    'wechat_account_industry': {
+        '信息平权': ['电子', '通信'],
+        '计墨社': ['电子', '通信'],
+        '刘翔科技研究': ['电子', '通信'],
+        '集微网': ['电子', '通信'],
+        '未来半导体': ['电子', '通信'],
+        '半导体行业联盟': ['电子', '通信'],
+        'AR圈': ['电子', '通信'],
+        '蓝猫研究所': ['电子', '通信'],
+        'gh_7d107b7b55f4': ['电子', '通信']  # 摩尔芯闻
+    }
+}
+
 
 
 class ArticleInfo:
@@ -47,6 +93,9 @@ class WeChatArticleHandler(MessageHandler):
         (self.storage_path / 'pdfs').mkdir(exist_ok=True)
         (self.storage_path / 'images').mkdir(exist_ok=True)
         
+        # 添加统一数据库路径
+        self.unified_db_path = Path('/home/yy/project/liujing-project-zhengquan/data/unified_information.db')
+
     async def init_db(self):
         """初始化数据库"""
         async with aiosqlite.connect(self.db_path) as db:
@@ -247,6 +296,80 @@ class WeChatArticleHandler(MessageHandler):
             self.logger.error(f"处理公众号文章消息时发生错误: {e}")
             return False
 
+    async def store_to_unified_db(self, article: ArticleInfo, from_user: str) -> Optional[int]:
+        """存储文章到统一数据库并返回记录ID"""
+        # 检查公众号是否在白名单中
+        if IF_ACCOUNT_WHITELIST:
+            if from_user not in WECHAT_FILTERS['account_whitelist']:
+                self.logger.info(f"公众号 {from_user} 不在白名单中，跳过存储到统一数据库")
+                return None
+        else:
+            self.logger.info(f"公众号 {from_user} , 白名单未开启，存储到统一数据库")    
+            
+        max_retries = 3
+        retry_delay = 1.0  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                # 合并摘要和内容，与迁移逻辑保持一致
+                content = f"{article.summary}\n{article.content}" if article.content else article.summary
+                
+                # 从行业映射获取行业信息
+                industries = INDUSTRY_MAPPING['wechat_account_industry'].get(from_user, [])
+                industry = ', '.join(industries)
+                
+                unified_data = (
+                    article.title,                # title
+                    content,                      # content
+                    None,                         # summary
+                    article.url,                  # url
+                    None,                         # company_name
+                    None,                         # stock_code
+                    industry,                     # industry
+                    '公众号',                      # info_type
+                    from_user,                    # source_detail
+                    article.pdf_path,             # local_file_path
+                    datetime.now(),               # publish_time
+                    json.dumps(article.to_dict()) # raw_data
+                )
+                
+                async with aiosqlite.connect(str(self.unified_db_path), timeout=30.0) as db:
+                    await db.execute("PRAGMA journal_mode=WAL")
+                    await db.execute("PRAGMA busy_timeout=5000")
+                    
+                    cursor = await db.execute("""
+                        INSERT INTO unified_information (
+                            title, content, summary, url, company_name, 
+                            stock_code, industry, info_type, source_detail,
+                            local_file_path, publish_time, raw_data
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        RETURNING id
+                    """, unified_data)
+                    
+                    row = await cursor.fetchone()
+                    await db.commit()
+                    
+                    if row:
+                        self.logger.info(f"文章已存储到统一数据库，记录ID: {row[0]}")
+                        return row[0]
+                        
+            except sqlite3.IntegrityError:
+                self.logger.debug(f"文章已存在于统一数据库中，跳过: {article.title}")
+                return None
+                
+            except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
+                if "database is locked" in str(e) or "cannot commit" in str(e):
+                    if attempt < max_retries - 1:
+                        self.logger.warning(f"数据库访问冲突，正在重试 ({attempt + 1}/{max_retries})")
+                        await asyncio.sleep(retry_delay * (attempt + 1))
+                        continue
+                self.logger.error(f"存储到统一数据库时发生错误: {e}")
+                
+            except Exception as e:
+                self.logger.error(f"存储到统一数据库时发生错误: {e}")
+                
+            return None
+
     async def _process_article_content(self, article: ArticleInfo, context: MessageContext):
         """异步处理文章内容"""
         try:
@@ -257,16 +380,16 @@ class WeChatArticleHandler(MessageHandler):
                     (article.url,)
                 )
                 row = await cursor.fetchone()
-                if row and row[0]:  # 如果文章已处理且处理成功
+                if row and row[0]:
                     self.logger.info(f"文章已处理过，跳过: {article.title}")
                     return
-                elif row and row[1] and os.path.exists(row[1]):  # 如果PDF路径存在且文件存在
+                elif row and row[1] and os.path.exists(row[1]):
                     self.logger.info(f"文章PDF已存在，跳过: {article.title}")
                     return
 
             # 获取文章内容
             if await self.fetch_article_content(article):
-                # 更新数据库
+                # 更新本地数据库
                 async with aiosqlite.connect(self.db_path) as db:
                     await db.execute("""
                     UPDATE wechat_articles 
@@ -280,6 +403,12 @@ class WeChatArticleHandler(MessageHandler):
                     ))
                     await db.commit()
                 self.logger.info(f"文章内容处理完成: {article.title}")
+                
+                # 存储到统一数据库并触发LLM任务
+                unified_id = await self.store_to_unified_db(article, context.from_user)
+                if unified_id:
+                    llm_summary_task.delay([unified_id])
+                    self.logger.info(f"已触发LLM摘要任务，记录ID: {unified_id}")
             else:
                 self.logger.error(f"文章内容处理失败: {article.title}")
         except Exception as e:
