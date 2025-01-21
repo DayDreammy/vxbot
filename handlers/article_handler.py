@@ -56,6 +56,8 @@ INDUSTRY_MAPPING = {
     }
 }
 
+VXBOT_PATH = '/home/yy/project/Gewechat/vxbot/'
+
 
 
 class ArticleInfo:
@@ -88,7 +90,7 @@ class WeChatArticleHandler(MessageHandler):
                  storage_path: str = 'data/articles'):
         super().__init__()
         self.db_path = db_path
-        self.storage_path = Path(storage_path)
+        self.storage_path = Path(VXBOT_PATH + storage_path)
         self.storage_path.mkdir(parents=True, exist_ok=True)
         (self.storage_path / 'pdfs').mkdir(exist_ok=True)
         (self.storage_path / 'images').mkdir(exist_ok=True)
@@ -313,7 +315,6 @@ class WeChatArticleHandler(MessageHandler):
             try:
                 # 合并摘要和内容，与迁移逻辑保持一致
                 content = f"{article.summary}\n{article.content}" if article.content else article.summary
-                
                 # 从行业映射获取行业信息
                 industries = INDUSTRY_MAPPING['wechat_account_industry'].get(from_user, [])
                 industry = ', '.join(industries)

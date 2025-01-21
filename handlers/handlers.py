@@ -150,12 +150,12 @@ class FileMessageHandler(MessageHandler):
             return False
 
         # 添加XML内容的日志
-        self.logger.info(f"XML内容: {ET.tostring(context.xml_content, encoding='unicode')}")
+        # self.logger.info(f"XML内容: {ET.tostring(context.xml_content, encoding='unicode')}")
 
         appmsg = context.xml_content.find('.//appmsg')
         if appmsg is not None:
             # 添加appmsg内容的日志
-            self.logger.info(f"appmsg内容: {ET.tostring(appmsg, encoding='unicode')}")
+            # self.logger.info(f"appmsg内容: {ET.tostring(appmsg, encoding='unicode')}")
             
             msg_type = appmsg.find('type').text if appmsg.find('type') is not None else 'unknown'
             self.logger.info(f"消息类型: {msg_type}")
