@@ -12,6 +12,7 @@ from playwright.async_api import async_playwright
 import hashlib
 import sys
 import sqlite3
+import random
 
 sys.path.append('/home/yy/project/liujing-project-zhengquan')
 from src.celery_task.tasks import llm_summary_task
@@ -98,6 +99,11 @@ class WeChatArticleHandler(MessageHandler):
         # 添加统一数据库路径
         self.unified_db_path = Path('/home/yy/project/liujing-project-zhengquan/data/unified_information.db')
 
+        # 添加信号量来控制并发
+        self.semaphore = asyncio.Semaphore(5)  # 同时最多处理5篇文章
+        # 添加共享的 Playwright 实例
+        self.browser = None
+
     async def init_db(self):
         """初始化数据库"""
         async with aiosqlite.connect(self.db_path) as db:
@@ -122,25 +128,50 @@ class WeChatArticleHandler(MessageHandler):
             """)
             await db.commit()
 
+    async def start(self):
+        """启动处理器，初始化浏览器"""
+        playwright = await async_playwright().start()
+        self.browser = await playwright.chromium.launch(
+            handle_sigint=False,
+            handle_sigterm=False,
+            handle_sighup=False
+        )
+        
+    async def stop(self):
+        """停止处理器，关闭浏览器"""
+        if self.browser:
+            await self.browser.close()
+
     async def fetch_article_content(self, article: ArticleInfo) -> bool:
         """获取文章内容并保存为PDF"""
-        try:
-            # 生成基于URL的唯一文件名
-            url_hash = hashlib.md5(article.url.encode()).hexdigest()
-            pdf_filename = f"{url_hash}.pdf"
-            pdf_path = self.storage_path / 'pdfs' / pdf_filename
+        async with self.semaphore:  # 使用信号量控制并发
+            try:
+                url_hash = hashlib.md5(article.url.encode()).hexdigest()
+                pdf_filename = f"{url_hash}.pdf"
+                pdf_path = self.storage_path / 'pdfs' / pdf_filename
 
-            async with async_playwright() as p:
-                browser = await p.chromium.launch()
-                context = await browser.new_context(
+                # 使用共享的浏览器实例创建新的上下文
+                context = await self.browser.new_context(
                     viewport={'width': 1280, 'height': 1024}
                 )
                 page = await context.new_page()
                 
-                # 访问文章页面
-                self.logger.info(f"正在获取文章内容: {article.title}")
-                await page.goto(article.url, wait_until='networkidle')
-                await page.wait_for_selector('#js_content')
+                # 设置更长的超时时间
+                page.set_default_timeout(60000)  # 60秒
+                
+                # 添加重试机制
+                max_retries = 3
+                retry_delay = 5  # 秒
+                
+                for attempt in range(max_retries):
+                    try:
+                        await page.goto(article.url, wait_until='networkidle', timeout=60000)
+                        break
+                    except Exception as e:
+                        if attempt == max_retries - 1:
+                            raise
+                        self.logger.warning(f"第{attempt + 1}次尝试获取文章失败: {e}")
+                        await asyncio.sleep(retry_delay)
 
                 # 获取文章内容
                 content = await page.evaluate('''() => {
@@ -231,12 +262,12 @@ class WeChatArticleHandler(MessageHandler):
                 })
                 article.pdf_path = str(pdf_path)
 
-                await browser.close()
+                await context.close()
                 return True
 
-        except Exception as e:
-            self.logger.error(f"获取文章内容失败: {e}")
-            return False
+            except Exception as e:
+                self.logger.error(f"获取文章内容失败: {article.title}, 错误: {e}")
+                return False
 
     async def handle(self, context: MessageContext) -> bool:
         try:
@@ -250,47 +281,21 @@ class WeChatArticleHandler(MessageHandler):
             if not articles:
                 self.logger.error("未找到文章信息")
                 return False
+            
+            # 批量处理文章
+            batch_size = 10  # 每批处理10篇文章
+            for i in range(0, len(articles), batch_size):
+                batch = articles[i:i + batch_size]
+                tasks = []
+                for article in batch:
+                    task = asyncio.create_task(self._process_article_content(article, context))
+                    tasks.append(task)
                 
-            # 记录每篇文章的信息并保存到数据库
-            async with aiosqlite.connect(self.db_path) as db:
-                for i, article in enumerate(articles, 1):
-                    self.logger.info(f"文章 {i}:")
-                    self.logger.info(f"标题: {article.title}")
-                    self.logger.info(f"链接: {article.url}")
-                    if article.summary:
-                        self.logger.info(f"摘要: {article.summary}")
-                    if article.cover_url:
-                        self.logger.info(f"封面图片: {article.cover_url}")
-                        
-                    # 获取文章内容（异步执行，不阻塞消息处理）
-                    asyncio.create_task(self._process_article_content(article, context))
-                        
-                    # 保存到数据库
-                    try:
-                        await db.execute("""
-                        INSERT INTO wechat_articles 
-                        (message_id, from_user, title, url, summary, cover_url, raw_data)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            str(context.data.get('MsgId', '')),
-                            context.from_user,
-                            article.title,
-                            article.url,
-                            article.summary,
-                            article.cover_url,
-                            json.dumps(context.data, ensure_ascii=False)
-                        ))
-                    except aiosqlite.IntegrityError:
-                        self.logger.info(f"文章已存在: {article.title}")
-                        continue
-                        
-                await db.commit()
-                    
-            # 将文章信息存储到处理结果中
-            context.processed_data.update({
-                'msg_type': 'article',
-                'articles': [article.to_dict() for article in articles]
-            })
+                # 等待当前批次完成
+                await asyncio.gather(*tasks)
+                
+                # 添加短暂延迟，避免连续批次间的资源竞争
+                await asyncio.sleep(1)
             
             return True
             
@@ -388,6 +393,9 @@ class WeChatArticleHandler(MessageHandler):
                     self.logger.info(f"文章PDF已存在，跳过: {article.title}")
                     return
 
+            # 添加延迟和随机等待，避免同时发起太多请求
+            await asyncio.sleep(random.uniform(0.1, 1.0))
+            
             # 获取文章内容
             if await self.fetch_article_content(article):
                 # 更新本地数据库
