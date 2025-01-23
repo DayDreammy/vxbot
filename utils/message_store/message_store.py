@@ -138,10 +138,10 @@ class MessageStore:
                         self.logger.warning(f"数据库访问冲突，正在重试 ({attempt + 1}/{max_retries})")
                         await asyncio.sleep(retry_delay * (attempt + 1))  # 指数退避
                         continue
-                self.logger.error(f"存储到统一数据库时发生错误: {e}")
+                self.logger.error(f"消息存储到统一数据库时发生错误: {e}")
                 
             except Exception as e:
-                self.logger.error(f"存储到统一数据库时发生错误: {e}")
+                self.logger.error(f"消息存储到统一数据库时发生错误: {e}")
                 
             return None
 

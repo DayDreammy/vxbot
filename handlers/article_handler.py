@@ -71,7 +71,7 @@ class ArticleInfo:
         self.content = ""
         self.pdf_path = ""
         self.images = []
-
+        self.account_name = ""
     def to_dict(self) -> Dict[str, str]:
         return {
             'title': self.title,
@@ -80,7 +80,8 @@ class ArticleInfo:
             'cover_url': self.cover_url,
             'content': self.content,
             'pdf_path': self.pdf_path,
-            'images': self.images
+            'images': self.images,
+            'account_name': self.account_name
         }
 
 
@@ -101,51 +102,36 @@ class WeChatArticleHandler(MessageHandler):
 
         # 添加信号量来控制并发
         self.semaphore = asyncio.Semaphore(5)  # 同时最多处理5篇文章
-        # 添加共享的 Playwright 实例
+        # 添加共享的 Playwright 实例和锁
         self.browser = None
+        self.browser_lock = asyncio.Lock()
+        self._playwright = None
+        self._initialized = False
 
-    async def init_db(self):
-        """初始化数据库"""
-        async with aiosqlite.connect(self.db_path) as db:
-            # 创建文章表
-            await db.execute("""
-            CREATE TABLE IF NOT EXISTS wechat_articles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                message_id TEXT,
-                from_user TEXT,
-                title TEXT,
-                url TEXT UNIQUE,
-                summary TEXT,
-                cover_url TEXT,
-                content TEXT,
-                pdf_path TEXT,
-                images TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                raw_data TEXT,
-                processed BOOLEAN DEFAULT FALSE,
-                process_time TIMESTAMP
-            )
-            """)
-            await db.commit()
-
-    async def start(self):
-        """启动处理器，初始化浏览器"""
-        playwright = await async_playwright().start()
-        self.browser = await playwright.chromium.launch(
-            handle_sigint=False,
-            handle_sigterm=False,
-            handle_sighup=False
-        )
-        
-    async def stop(self):
-        """停止处理器，关闭浏览器"""
-        if self.browser:
-            await self.browser.close()
+    async def ensure_browser(self):
+        """确保浏览器已初始化"""
+        if not self._initialized:
+            async with self.browser_lock:
+                if not self._initialized:  # 双重检查
+                    try:
+                        self._playwright = await async_playwright().start()
+                        self.browser = await self._playwright.chromium.launch(
+                            handle_sigint=False,
+                            handle_sigterm=False,
+                            handle_sighup=False
+                        )
+                        self._initialized = True
+                    except Exception as e:
+                        self.logger.error(f"初始化浏览器失败: {e}")
+                        raise
 
     async def fetch_article_content(self, article: ArticleInfo) -> bool:
         """获取文章内容并保存为PDF"""
         async with self.semaphore:  # 使用信号量控制并发
             try:
+                # 确保浏览器已初始化
+                await self.ensure_browser()
+                
                 url_hash = hashlib.md5(article.url.encode()).hexdigest()
                 pdf_filename = f"{url_hash}.pdf"
                 pdf_path = self.storage_path / 'pdfs' / pdf_filename
@@ -154,124 +140,165 @@ class WeChatArticleHandler(MessageHandler):
                 context = await self.browser.new_context(
                     viewport={'width': 1280, 'height': 1024}
                 )
-                page = await context.new_page()
                 
-                # 设置更长的超时时间
-                page.set_default_timeout(60000)  # 60秒
-                
-                # 添加重试机制
-                max_retries = 3
-                retry_delay = 5  # 秒
-                
-                for attempt in range(max_retries):
-                    try:
-                        await page.goto(article.url, wait_until='networkidle', timeout=60000)
-                        break
-                    except Exception as e:
-                        if attempt == max_retries - 1:
-                            raise
-                        self.logger.warning(f"第{attempt + 1}次尝试获取文章失败: {e}")
-                        await asyncio.sleep(retry_delay)
-
-                # 获取文章内容
-                content = await page.evaluate('''() => {
-                    const content = document.querySelector('#js_content');
-                    return content ? content.innerText : '';
-                }''')
-                article.content = content
-
-                # 处理延迟加载的图片
-                await page.evaluate('''() => {
-                    const images = Array.from(document.querySelectorAll('#js_content img'));
-                    images.forEach(img => {
-                        if (img.dataset.src) {
-                            img.src = img.dataset.src;
-                            img.style.visibility = 'visible';
-                            img.style.opacity = '1';
-                            img.removeAttribute('data-src');
-                        }
-                    });
-                }''')
-
-                # 等待所有图片加载完成
-                await page.evaluate('''() => {
-                    return Promise.all(
-                        Array.from(document.querySelectorAll('#js_content img'))
-                            .filter(img => !img.complete)
-                            .map(img => new Promise(resolve => {
-                                img.onload = img.onerror = resolve;
-                            }))
-                    );
-                }''')
-
-                # 获取图片URL列表
-                images = await page.evaluate('''() => {
-                    return Array.from(document.querySelectorAll('#js_content img'))
-                        .map(img => img.src);
-                }''')
-
-                # 下载图片
-                image_paths = []
-                for i, img_url in enumerate(images):
-                    if img_url:
-                        img_filename = f"{url_hash}_{i}.jpg"
-                        img_path = self.storage_path / 'images' / img_filename
+                try:
+                    page = await context.new_page()
+                    
+                    # 设置更长的超时时间
+                    page.set_default_timeout(60000)  # 60秒
+                    
+                    # 添加重试机制
+                    max_retries = 3
+                    retry_delay = 5  # 秒
+                    
+                    for attempt in range(max_retries):
                         try:
-                            # 直接下载图片
-                            response = await context.request.get(img_url)
-                            if response.ok:
-                                content = await response.body()
-                                img_path.write_bytes(content)
-                                image_paths.append(str(img_path))
-                            else:
-                                self.logger.error(f"下载图片失败: {img_url}, 状态码: {response.status}")
+                            await page.goto(article.url, wait_until='networkidle', timeout=60000)
+                            break
                         except Exception as e:
-                            self.logger.error(f"下载图片失败: {img_url}, 错误: {e}")
+                            if attempt == max_retries - 1:
+                                raise
+                            self.logger.warning(f"第{attempt + 1}次尝试获取文章失败: {e}")
+                            await asyncio.sleep(retry_delay)
 
-                article.images = image_paths
+                    # 获取文章内容
+                    content = await page.evaluate('''() => {
+                        const content = document.querySelector('#js_content');
+                        return content ? content.innerText : '';
+                    }''')
+                    article.content = content
 
-                # 注入CSS以优化PDF布局
-                await page.add_style_tag(content='''
-                    #js_content {
-                        padding: 20px !important;
-                    }
-                    #js_content img {
-                        max-width: 100% !important;
-                        height: auto !important;
-                        margin: 10px 0 !important;
-                        page-break-inside: avoid !important;
-                        display: block !important;
-                    }
-                    #js_content * {
-                        max-width: 100% !important;
-                        word-break: break-word !important;
-                    }
-                ''')
+                    # 获取公众号名称
+                    account_name = await page.evaluate('''() => {
+                        const content = document.querySelector('span.rich_media_meta_nickname a#js_name');
+                        return content ? content.innerText : '';
+                    }''')
+                    # 处理转发类文章
+                    if account_name == "" or account_name is None:
+                        account_name = await page.evaluate('''() => {
+                            const contentElement = document.querySelector('.account_nickname_inner');
+                            return contentElement ? contentElement.innerText : '';
+                        }''')
 
-                # 设置PDF选项并生成PDF
-                await page.pdf(**{
-                    'path': str(pdf_path),
-                    'format': 'A4',
-                    'print_background': True,
-                    'margin': {
-                        'top': '20px',
-                        'right': '20px',
-                        'bottom': '20px',
-                        'left': '20px'
-                    }
-                })
-                article.pdf_path = str(pdf_path)
+                    article.account_name = account_name
 
-                await context.close()
+                    # 处理延迟加载的图片
+                    await page.evaluate('''() => {
+                        const images = Array.from(document.querySelectorAll('#js_content img'));
+                        images.forEach(img => {
+                            if (img.dataset.src) {
+                                img.src = img.dataset.src;
+                                img.style.visibility = 'visible';
+                                img.style.opacity = '1';
+                                img.removeAttribute('data-src');
+                            }
+                        });
+                    }''')
+
+                    # 等待所有图片加载完成
+                    await page.evaluate('''() => {
+                        return Promise.all(
+                            Array.from(document.querySelectorAll('#js_content img'))
+                                .filter(img => !img.complete)
+                                .map(img => new Promise(resolve => {
+                                    img.onload = img.onerror = resolve;
+                                }))
+                        );
+                    }''')
+
+                    # 获取图片URL列表
+                    images = await page.evaluate('''() => {
+                        return Array.from(document.querySelectorAll('#js_content img'))
+                            .map(img => img.src);
+                    }''')
+
+                    # 下载图片
+                    image_paths = []
+                    for i, img_url in enumerate(images):
+                        if img_url:
+                            img_filename = f"{url_hash}_{i}.jpg"
+                            img_path = self.storage_path / 'images' / img_filename
+                            try:
+                                # 直接下载图片
+                                response = await context.request.get(img_url)
+                                if response.ok:
+                                    content = await response.body()
+                                    img_path.write_bytes(content)
+                                    image_paths.append(str(img_path))
+                                else:
+                                    self.logger.error(f"下载图片失败: {img_url}, 状态码: {response.status}")
+                            except Exception as e:
+                                self.logger.error(f"下载图片失败: {img_url}, 错误: {e}")
+
+                    article.images = image_paths
+
+                    # 注入CSS以优化PDF布局
+                    await page.add_style_tag(content='''
+                        #js_content {
+                            padding: 20px !important;
+                        }
+                        #js_content img {
+                            max-width: 100% !important;
+                            height: auto !important;
+                            margin: 10px 0 !important;
+                            page-break-inside: avoid !important;
+                            display: block !important;
+                        }
+                        #js_content * {
+                            max-width: 100% !important;
+                            word-break: break-word !important;
+                        }
+                    ''')
+
+                    # 设置PDF选项并生成PDF
+                    await page.pdf(**{
+                        'path': str(pdf_path),
+                        'format': 'A4',
+                        'print_background': True,
+                        'margin': {
+                            'top': '20px',
+                            'right': '20px',
+                            'bottom': '20px',
+                            'left': '20px'
+                        }
+                    })
+                    article.pdf_path = str(pdf_path)
+
+                finally:
+                    await context.close()
+
                 return True
 
             except Exception as e:
                 self.logger.error(f"获取文章内容失败: {article.title}, 错误: {e}")
+                # 如果是浏览器相关错误，尝试重新初始化
+                if "new_context" in str(e):
+                    self._initialized = False
+                    self.browser = None
                 return False
+
+    async def stop(self):
+        """停止处理器，关闭浏览器"""
+        if self.browser:
+            try:
+                await self.browser.close()
+            except Exception as e:
+                self.logger.error(f"关闭浏览器失败: {e}")
+            self.browser = None
+        if self._playwright:
+            try:
+                await self._playwright.stop()
+            except Exception as e:
+                self.logger.error(f"停止 Playwright 失败: {e}")
+            self._playwright = None
+        self._initialized = False
 
     async def handle(self, context: MessageContext) -> bool:
         try:
             self.logger.info(f"开始处理公众号文章消息 - 来自: {context.from_user}")
+            
+            # 确保浏览器已初始化
+            await self.ensure_browser()
             
             # 确保数据库已初始化
             await self.init_db()
@@ -283,7 +310,7 @@ class WeChatArticleHandler(MessageHandler):
                 return False
             
             # 批量处理文章
-            batch_size = 10  # 每批处理10篇文章
+            batch_size = 5  # 每批处理5篇文章
             for i in range(0, len(articles), batch_size):
                 batch = articles[i:i + batch_size]
                 tasks = []
@@ -320,13 +347,19 @@ class WeChatArticleHandler(MessageHandler):
             try:
                 # 合并摘要和内容，与迁移逻辑保持一致
                 content = f"{article.summary}\n{article.content}" if article.content else article.summary
+                
                 # 从行业映射获取行业信息
                 industries = INDUSTRY_MAPPING['wechat_account_industry'].get(from_user, [])
                 industry = ', '.join(industries)
                 
+                # 确保content是字符串类型
+                if isinstance(content, dict) or content is None:
+                    content = ""
+                
+                # 确保所有字段都是数据库支持的类型
                 unified_data = (
                     article.title,                # title
-                    content,                      # content
+                    str(content),                      # content
                     None,                         # summary
                     article.url,                  # url
                     None,                         # company_name
@@ -336,7 +369,7 @@ class WeChatArticleHandler(MessageHandler):
                     from_user,                    # source_detail
                     article.pdf_path,             # local_file_path
                     datetime.now(),               # publish_time
-                    json.dumps(article.to_dict()) # raw_data
+                    None     # raw_data
                 )
                 
                 async with aiosqlite.connect(str(self.unified_db_path), timeout=30.0) as db:
@@ -369,10 +402,10 @@ class WeChatArticleHandler(MessageHandler):
                         self.logger.warning(f"数据库访问冲突，正在重试 ({attempt + 1}/{max_retries})")
                         await asyncio.sleep(retry_delay * (attempt + 1))
                         continue
-                self.logger.error(f"存储到统一数据库时发生错误: {e}")
+                self.logger.error(f"文章存储到统一数据库时发生错误: {e}")
                 
             except Exception as e:
-                self.logger.error(f"存储到统一数据库时发生错误: {e}")
+                self.logger.error(f"文章存储到统一数据库时发生错误: {e}")
                 
             return None
 
@@ -402,19 +435,20 @@ class WeChatArticleHandler(MessageHandler):
                 async with aiosqlite.connect(self.db_path) as db:
                     await db.execute("""
                     UPDATE wechat_articles 
-                    SET content = ?, pdf_path = ?, images = ?, processed = TRUE, process_time = CURRENT_TIMESTAMP
+                    SET content = ?, pdf_path = ?, images = ?, account_name = ?, processed = TRUE, process_time = CURRENT_TIMESTAMP
                     WHERE url = ?
                     """, (
                         article.content,
                         article.pdf_path,
                         json.dumps(article.images),
+                        article.account_name,
                         article.url
                     ))
                     await db.commit()
-                self.logger.info(f"文章内容处理完成: {article.title}")
+                self.logger.info(f"文章内容处理完成: {article.title}，from: {article.account_name}")
                 
                 # 存储到统一数据库并触发LLM任务
-                unified_id = await self.store_to_unified_db(article, context.from_user)
+                unified_id = await self.store_to_unified_db(article, article.account_name)
                 if unified_id:
                     llm_summary_task.delay([unified_id])
                     self.logger.info(f"已触发LLM摘要任务，记录ID: {unified_id}")
@@ -477,3 +511,27 @@ class WeChatArticleHandler(MessageHandler):
             
         msg_type = appmsg.find('type')
         return msg_type is not None and msg_type.text == '5'  # 文章类型 
+
+    async def init_db(self):
+        """初始化数据库"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # 创建文章表
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS wechat_articles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id TEXT,
+                from_user TEXT,
+                title TEXT,
+                url TEXT UNIQUE,
+                summary TEXT,
+                cover_url TEXT,
+                content TEXT,
+                pdf_path TEXT,
+                images TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                raw_data TEXT,
+                processed BOOLEAN DEFAULT FALSE,
+                process_time TIMESTAMP
+            )
+            """)
+            await db.commit()

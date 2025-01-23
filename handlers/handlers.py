@@ -142,7 +142,7 @@ class FileMessageHandler(MessageHandler):
 
     async def handle(self, context: MessageContext) -> bool:
         # 添加原始消息内容的日志
-        self.logger.info(f"原始消息数据: {json.dumps(context.data, ensure_ascii=False, indent=2)}")
+        self.logger.debug(f"原始消息数据: {json.dumps(context.data, ensure_ascii=False, indent=2)}")
         self.logger.info(f"消息内容: {context.content}")
         
         if context.xml_content is None:
