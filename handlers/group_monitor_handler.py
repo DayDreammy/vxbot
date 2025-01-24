@@ -86,53 +86,6 @@ class GroupMonitorHandler(MessageHandler):
             self.logger.error(f"存储消息时发生错误: {e}")
             return False
 
-    async def store_to_unified_db(self, message_data: dict) -> int:
-        """存储消息到统一数据库并返回记录ID"""
-        try:
-            content = message_data['content']
-            title = content[:100] + '...' if len(content) > 100 else content
-            url = f"wechat://message/{message_data['message_id']}"
-            
-            # 假设群名映射到行业的逻辑
-            industry = '电子'  # 需要根据实际情况设置行业
-            
-            unified_data = (
-                title,                          # title
-                message_data.get('processed_data') or content,  # content
-                None,                           # summary
-                url,                            # url
-                None,                           # company_name
-                None,                           # stock_code
-                industry,                       # industry
-                '微信群',                        # info_type
-                message_data['group_id'],       # source_detail
-                message_data.get('media_path'), # local_file_path
-                message_data.get('created_at', datetime.now()),  # publish_time
-                json.dumps(message_data.get('raw_data', {}))    # raw_data
-            )
-            
-            async with aiosqlite.connect(str(self.unified_db_path)) as db:
-                cursor = await db.execute("""
-                    INSERT INTO unified_information (
-                        title, content, summary, url, company_name, 
-                        stock_code, industry, info_type, source_detail,
-                        local_file_path, publish_time, raw_data
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    RETURNING id
-                """, unified_data)
-                await db.commit()
-                
-                # 获取插入记录的ID
-                row = await cursor.fetchone()
-                if row:
-                    return row[0]
-                    
-        except sqlite3.IntegrityError:
-            self.logger.debug(f"消息已存在于统一数据库中，跳过")
-        except Exception as e:
-            self.logger.error(f"存储到统一数据库时发生错误: {e}")
-        
-        return None
 
     async def _save_media_info(self, context: MessageContext, message_id: str) -> str:
         """保存媒体信息"""

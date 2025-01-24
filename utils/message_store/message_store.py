@@ -85,8 +85,24 @@ class MessageStore:
         for attempt in range(max_retries):
             try:
                 # 准备统一数据库的数据
-                content = message_data['content']
-                title = content[:100] + '...' if len(content) > 100 else content
+                try:
+                    content = message_data['content']
+                    title = content[:100] + '...' if len(content) > 100 else content
+                    if not content or not isinstance(content, str):
+                        self.logger.warning(f"Invalid content format: {content}")
+                    else:
+                        # Remove sender prefix if exists and get first line as title
+                        try:
+                            content_without_prefix = content.split(':', 1)[1].strip() if ':' in content else content
+                            first_line = content_without_prefix.split('\n')[0].strip()
+                            self.logger.info(f"First line: {first_line}")
+                            if first_line:  # If first line is empty after stripping
+                                title = first_line[:100] + '...' if len(first_line) > 100 else first_line     
+                        except IndexError:
+                            self.logger.warning(f"Failed to extract title from content: {content}")
+                except Exception as e:
+                    self.logger.error(f"Error extracting title: {e}")
+
                 url = f"wechat://message/{message_data['message_id']}"
                 
                 # 假设群名映射到行业的逻辑

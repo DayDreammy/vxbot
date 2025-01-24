@@ -17,7 +17,7 @@ import random
 sys.path.append('/home/yy/project/liujing-project-zhengquan')
 from src.celery_task.tasks import llm_summary_task
 
-IF_ACCOUNT_WHITELIST = False
+IF_ACCOUNT_WHITELIST = True
 
 # 微信相关配置
 WECHAT_FILTERS = {
@@ -236,6 +236,8 @@ class WeChatArticleHandler(MessageHandler):
                     await page.add_style_tag(content='''
                         #js_content {
                             padding: 20px !important;
+                            font-size: 26px !important;
+                            line-height: 1.6 !important;
                         }
                         #js_content img {
                             max-width: 100% !important;
@@ -247,6 +249,14 @@ class WeChatArticleHandler(MessageHandler):
                         #js_content * {
                             max-width: 100% !important;
                             word-break: break-word !important;
+                            font-size: inherit !important;
+                        }
+                        #js_content h1, #js_content h2, #js_content h3 {
+                            font-size: 1.4em !important;
+                            margin: 1em 0 !important;
+                        }
+                        #js_content p {
+                            margin: 0.8em 0 !important;
                         }
                     ''')
 
@@ -256,10 +266,10 @@ class WeChatArticleHandler(MessageHandler):
                         'format': 'A4',
                         'print_background': True,
                         'margin': {
-                            'top': '20px',
-                            'right': '20px',
-                            'bottom': '20px',
-                            'left': '20px'
+                            'top': '10px',
+                            'right': '10px',
+                            'bottom': '10px',
+                            'left': '10px'
                         }
                     })
                     article.pdf_path = str(pdf_path)
