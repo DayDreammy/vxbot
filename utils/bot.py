@@ -16,6 +16,10 @@ class BotConfig:
     api_key: str
     model: str = "deepseek-chat"  # Default to deepseek-chat
     base_url: Optional[str] = None
+    backup_api_key: Optional[str] = None
+    backup_base_url: Optional[str] = None
+    backup_model: Optional[str] = None
+
     max_tokens: int = 8192
     temperature: float = 0.7
     system_prompt: str = "You are a helpful assistant that specializes in summarizing text."
@@ -81,6 +85,9 @@ class ChatBot:
             api_key=os.getenv("OPENAI_API_KEY", ""),
             model=os.getenv("OPENAI_MODEL", "deepseek-chat"),
             base_url=os.getenv("OPENAI_BASE_URL", None),
+            backup_api_key=os.getenv("OPENAI_API_KEY_2", ""),
+            backup_base_url=os.getenv("OPENAI_BASE_URL_2", None),
+            backup_model=os.getenv("OPENAI_MODEL_2", "deepseek-chat"),
             max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "8192")),
             temperature=float(os.getenv("OPENAI_TEMPERATURE", "0.7")),
             system_prompt=os.getenv(
@@ -135,6 +142,56 @@ class ChatBot:
     def summarize(self, text: str, max_words: Optional[int] = None) -> str:
         """Synchronous version of summarize_async"""
         return asyncio.run(self.summarize_async(text, max_words))
+    
+    async def _call_llm_api(self, messages: List[Dict[str, str]]) -> str:
+        """
+        封装 API 调用，处理错误和返回摘要内容
+        """
+        max_retries = 4
+        current_base_url = self.config.base_url
+        current_model = self.config.model
+        current_api_key = self.config.api_key
+
+        for attempt in range(max_retries):
+            try:
+                client = AsyncOpenAI(
+                    api_key=current_api_key,
+                    base_url=current_base_url
+                )
+
+                response = await client.chat.completions.create(
+                    model=current_model,
+                    messages=messages,
+                    max_tokens=self.config.max_tokens,
+                    temperature=self.config.temperature
+                )
+                
+                if response is None:
+                    raise Exception("API response is None (possible network error)")
+                
+                logger.info(f"API Response: {response}")
+                return response.choices[0].message.content
+
+            except Exception as api_error:
+                logger.error(f"Error during API call (attempt {attempt + 1}): {api_error}")
+                
+                if attempt == max_retries - 2:  # 倒数第二次尝试
+                    if (self.config.backup_base_url and 
+                        self.config.backup_model and 
+                        self.config.backup_api_key):
+                        logger.info("Switching to backup configuration")
+                        current_base_url = self.config.backup_base_url
+                        current_model = self.config.backup_model
+                        current_api_key = self.config.backup_api_key
+                    else:
+                        logger.error("No complete backup configuration available")
+                        raise
+
+                await asyncio.sleep(2 ** attempt)  # 指数退避
+
+        raise Exception(f"Failed after {max_retries} attempts")
+
+     
         
     async def summarize_async(self, text: str, max_words: Optional[int] = None) -> str:
         """Asynchronously summarize the given text"""
@@ -148,13 +205,10 @@ class ChatBot:
             
             # If text is within limits, process normally
             if len(text) <= max_text_chars:
-                response = await self.async_client.chat.completions.create(
-                    model=self.config.model,
-                    messages=self._create_summarization_messages(text),
-                    max_tokens=self.config.max_tokens,
-                    temperature=self.config.temperature
+                final_summary = await self._call_llm_api(
+                    self._create_summarization_messages(text)
                 )
-                return response.choices[0].message.content
+                return final_summary
             
             # For long texts, split and summarize in parts
             chunks = self._split_text(text, max_text_chars)
@@ -167,16 +221,13 @@ class ChatBot:
             async def summarize_chunk(chunk: str, index: int) -> str:
                 async with semaphore:  # 使用信号量控制并发
                     logger.info(f"Processing chunk {index}/{total_chunks}")
-                    response = await self.async_client.chat.completions.create(
-                        model=self.config.model,
-                        messages=self._create_summarization_messages(
+                    content =  await self._call_llm_api(
+                    self._create_summarization_messages(
                             chunk,
-                            f"You are summarizing part {index} of {total_chunks}. 请提炼出关键信息，保留关键原文。输出格式为：【关键词】xxx，xxx\n【主要内容】\n1. xxx\n2. xxx\n3. xxx.  注意：直接输出总结结果，不要输出任何解释和其他内容，如“好的，下面是对这份公告的总结：”之类的内容，以“【总结】”开头。"
-                        ),
-                        max_tokens=self.config.max_tokens,
-                        temperature=self.config.temperature
-                    )
-                    return response.choices[0].message.content
+                            f"You are summarizing part {index} of {total_chunks}. 请提炼出关键信息，保留关键原文。"
+                        )
+                )
+                    return content
 
             # 并发执行所有总结任务
             tasks = [summarize_chunk(chunk, i) for i, chunk in enumerate(chunks, 1)]
@@ -189,16 +240,13 @@ class ChatBot:
             # Second round: fixed-level hierarchical combination
             async def combine_batch_summaries(summaries_batch: List[str], batch_index: int, total_batches: int) -> str:
                 combined_text = "\n\n".join(summaries_batch)
-                response = await self.async_client.chat.completions.create(
-                    model=self.config.model,
-                    messages=self._create_summarization_messages(
+                content = await self._call_llm_api(
+                    self._create_summarization_messages(
                         combined_text,
-                        f"这是第{batch_index}/{total_batches}组摘要，请整合成一个连贯的总结。输出格式为：【关键词】xxx，xxx\n【主要内容】\n1. xxx\n2. xxx\n3. xxx.  注意：直接输出总结结果，不要输出任何解释和其他内容，如“好的，下面是对这份公告的总结：”之类的内容，以“【总结】”开头。"
-                    ),
-                    max_tokens=self.config.max_tokens,
-                    temperature=self.config.temperature
+                        f"这是第{batch_index}/{total_batches}组摘要，请整合成一个连贯的总结。"
+                    )
                 )
-                return response.choices[0].message.content
+                return content
 
             # 根据摘要数量选择处理策略
             if len(summaries) <= 5:
