@@ -3,6 +3,7 @@ from typing import Dict, Optional
 from config import Config
 import aiohttp
 
+
 class MessageSender:
     """消息发送类，负责发送不同类型的消息"""
 
@@ -41,9 +42,11 @@ class MessageSender:
                         if result.get("ret") == 200:
                             self.logger.info(f"文本消息发送成功 - 接收者: {to_wxid}")
                             return True
-                        self.logger.error(f"发送文本消息失败: {result.get('msg', '未知错误')}")
+                        self.logger.error(
+                            f"发送文本消息失败: {result.get('msg', '未知错误')}")
                     else:
-                        self.logger.error(f"发送文本消息请求失败: HTTP {response.status}")
+                        self.logger.error(
+                            f"发送文本消息请求失败: HTTP {response.status}")
         except Exception as e:
             self.logger.error(f"发送文本消息时发生错误: {e}")
         return False
