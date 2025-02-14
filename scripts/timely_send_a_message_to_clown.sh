@@ -1,5 +1,7 @@
 #!/bin/bash
 
+cd /home/yy/project/Gewechat/vxbot
+
 # 获取当前北京时间，假设系统时区设置为北京（CST）, 否则需要使用UTC加8小时
 current_time=$(date +"%Y年%m月%d日 %H:%M:%S")
 
